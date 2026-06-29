@@ -42,7 +42,8 @@ def get_num_transfer_tokens(mask_index, steps):
 
 @ torch.no_grad()
 def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, block_length=128, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
+             cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False,
+             confidence_eos_eot_inf=False, token_selection_confidence_threshold=None):
     '''
     Args:
         model: Mask predictor.
@@ -56,6 +57,9 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         mask_id: The toke id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        token_selection_confidence_threshold: If set, only predicted tokens with confidence greater than or equal to
+            this threshold are transferred. This is useful for ARness ablations because a higher threshold makes each
+            diffusion step commit fewer tokens.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -113,7 +117,9 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
 
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
             for j in range(confidence.shape[0]):
-                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
+                select_confidence, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
+                if token_selection_confidence_threshold is not None:
+                    select_index = select_index[select_confidence >= token_selection_confidence_threshold]
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
 

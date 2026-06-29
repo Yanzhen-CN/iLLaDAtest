@@ -1,0 +1,89 @@
+# Default iLLaDA experiment plan.
+# Edit this file, then run:
+#   python run_test.py
+#
+# For a cheap command/config sanity check:
+#   python run_test.py --dry-run
+
+execution:
+  output_dir: outputs/illada_runs
+  dry_run: false
+  stop_on_error: true
+  opencompass_args: []
+
+model:
+  type: instruct
+  path: GSAI-ML/iLLaDA-8B-Instruct
+  abbr: illada-8b-instruct
+  max_out_len: 512
+  max_seq_len: 4096
+  batch_size: 1
+  batch_size_: 1
+  mask_id: 5
+  cfg: 0.0
+  temperature: 0.0
+  remasking: low_confidence
+  model_kwargs:
+    device_map: auto
+    torch_dtype: torch.bfloat16
+  run_cfg:
+    num_gpus: 1
+
+runner:
+  partitioner:
+    num_worker: 1
+    num_split: null
+    min_task_size: 16
+  runner:
+    max_num_workers: 1
+    retry: 1
+
+defaults:
+  gen_length: 256
+  gen_steps: 256
+  gen_blocksize: 16
+  diff_confidence_eos_eot_inf: true
+  diff_logits_eos_inf: false
+  token_selection_confidence_threshold: null
+
+experiments:
+  - name: parallel_gsm8k
+    enabled: true
+    benchmark: gsm8k
+    params:
+      gen_length: 256
+      gen_steps: 256
+      diff_confidence_eos_eot_inf: true
+    sweep:
+      gen_blocksize: [1, 4, 8, 16, 32, 64, 128, 256]
+
+  - name: context_math
+    enabled: false
+    benchmark: math
+    params:
+      gen_length: 512
+      gen_steps: 512
+      gen_blocksize: 64
+      diff_confidence_eos_eot_inf: true
+    sweep:
+      max_seq_len: [1024, 2048, 4096, 8192]
+
+  - name: arness_gsm8k_threshold
+    enabled: false
+    benchmark: gsm8k
+    params:
+      gen_length: 256
+      gen_steps: 256
+      gen_blocksize: 16
+      diff_confidence_eos_eot_inf: true
+    sweep:
+      token_selection_confidence_threshold: [null, 0.1, 0.2, 0.4, 0.6, 0.8]
+
+  - name: capability_snapshot
+    enabled: false
+    benchmark: [gsm8k, math, gpqa, humaneval, mbpp, ifeval]
+    params:
+      gen_length: 512
+      gen_steps: 512
+      gen_blocksize: 32
+      diff_confidence_eos_eot_inf: true

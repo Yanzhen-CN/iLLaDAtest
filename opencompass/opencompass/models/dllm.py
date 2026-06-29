@@ -143,6 +143,7 @@ class LLaDAModel(BaseModel):
                  batch_size_ = 1,
                  diff_confidence_eos_eot_inf = False,
                  diff_logits_eos_inf = False,
+                 token_selection_confidence_threshold = None,
                  ) -> None:
         super().__init__(path=path,
                          max_seq_len=max_seq_len,
@@ -182,12 +183,15 @@ class LLaDAModel(BaseModel):
         self.mask_id = mask_id
         self.diff_confidence_eos_eot_inf = diff_confidence_eos_eot_inf
         self.diff_logits_eos_inf = diff_logits_eos_inf
+        self.token_selection_confidence_threshold = token_selection_confidence_threshold
 
         self.template_parser = _get_meta_template(meta_template)
 
     def _load_tokenizer(self, path: str, tokenizer_path: Optional[str],
                         tokenizer_kwargs: dict):
         from transformers import AutoTokenizer
+        tokenizer_kwargs = dict(tokenizer_kwargs)
+        tokenizer_kwargs.setdefault('trust_remote_code', True)
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path if tokenizer_path else path, **tokenizer_kwargs)
 
@@ -261,7 +265,8 @@ class LLaDAModel(BaseModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 path, trust_remote_code = True,**model_kwargs)
         except ValueError:
-            self.model = AutoModel.from_pretrained(path, **model_kwargs)
+            self.model = AutoModel.from_pretrained(
+                path, trust_remote_code=True, **model_kwargs)
 
         if peft_path is not None:
             from peft import PeftModel
@@ -376,12 +381,16 @@ class LLaDAModel(BaseModel):
         print('temperature:', self.temperature, 'cfg:', self.cfg, 'remasking:', self.remasking)
         print('mask_id:', self.mask_id, 'padding_id:', self.padding_id)
         print('diff_confidence_eos_eot_inf:', self.diff_confidence_eos_eot_inf, 'diff_logits_eos_inf:', self.diff_logits_eos_inf)
+        print('token_selection_confidence_threshold:', self.token_selection_confidence_threshold)
         print('final prompt:', prompt)
         self.tokenizer.padding_side = "left" 
-        prompt = self.tokenizer.batch_encode_plus(prompt, padding = True, return_tensors='pt')['input_ids']
+        encoded_prompt = self.tokenizer.batch_encode_plus(prompt, padding = True, return_tensors='pt')
+        prompt = encoded_prompt['input_ids']
+        attention_mask = encoded_prompt.get('attention_mask')
         x = LLaDA_generate(
             model = self.model,
             prompt = prompt.to(self.model.device),
+            attention_mask = attention_mask.to(self.model.device) if attention_mask is not None else None,
             steps = self.gen_steps,
             gen_length = self.gen_length,
             block_length = self.gen_blocksize,
@@ -391,6 +400,7 @@ class LLaDAModel(BaseModel):
             mask_id = self.mask_id,
             confidence_eos_eot_inf = self.diff_confidence_eos_eot_inf,
             logits_eos_inf = self.diff_logits_eos_inf,
+            token_selection_confidence_threshold = self.token_selection_confidence_threshold,
         )
         responses = []
         batch_size = prompt.shape[0]
@@ -512,12 +522,16 @@ class LLaDABaseModel(LLaDAModel):
         print('temperature:', self.temperature, 'cfg:', self.cfg, 'remasking:', self.remasking)
         print('mask_id:', self.mask_id, 'padding_id:', self.padding_id)
         print('diff_confidence_eos_eot_inf:', self.diff_confidence_eos_eot_inf, 'diff_logits_eos_inf:', self.diff_logits_eos_inf)
+        print('token_selection_confidence_threshold:', self.token_selection_confidence_threshold)
         print('final prompt:', prompt)
         self.tokenizer.padding_side = "left" 
-        prompt = self.tokenizer.batch_encode_plus(prompt, padding = True, return_tensors='pt')['input_ids']
+        encoded_prompt = self.tokenizer.batch_encode_plus(prompt, padding = True, return_tensors='pt')
+        prompt = encoded_prompt['input_ids']
+        attention_mask = encoded_prompt.get('attention_mask')
         x = LLaDA_generate(
             model = self.model,
             prompt = prompt.to(self.model.device),
+            attention_mask = attention_mask.to(self.model.device) if attention_mask is not None else None,
             steps = self.gen_steps,
             gen_length = self.gen_length,
             block_length = self.gen_blocksize,
@@ -527,6 +541,7 @@ class LLaDABaseModel(LLaDAModel):
             mask_id = self.mask_id,
             confidence_eos_eot_inf = self.diff_confidence_eos_eot_inf,
             logits_eos_inf = self.diff_logits_eos_inf,
+            token_selection_confidence_threshold = self.token_selection_confidence_threshold,
         )
         responses = []
         batch_size = prompt.shape[0]
