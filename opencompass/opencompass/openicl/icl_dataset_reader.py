@@ -240,7 +240,14 @@ def load_partial_dataset(
         rand.shuffle(index_list)
         dataset = dataset.select(index_list[:size])
     elif isinstance(size, str):
-        dataset = dataset.select(eval(f'index_list{size}'))
+        if size.startswith('indices:'):
+            selected_indices = [
+                int(item.strip()) for item in size[len('indices:'):].split(',')
+                if item.strip()
+            ]
+            dataset = dataset.select(selected_indices)
+        else:
+            dataset = dataset.select(eval(f'index_list{size}'))
     return dataset
 
 

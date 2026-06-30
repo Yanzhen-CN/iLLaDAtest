@@ -1,9 +1,17 @@
 # Default iLLaDA experiment plan.
-# Edit this file, then run:
+# Edit `run.tasks` to choose which task section to run, then:
 #   python run_test.py
 #
-# For a cheap command/config sanity check:
+# Examples:
 #   python run_test.py --dry-run
+#   python run_test.py --only context
+#   python run_test.py --only paper_anchor_gsm8k
+
+run:
+  # Choose from: paper_anchor, parallel, context, arness, trace_audit, capability, all
+  tasks: [parallel]
+  # Optional direct experiment names. Usually leave empty and use tasks above.
+  experiments: []
 
 execution:
   output_dir: outputs/illada_runs
@@ -43,6 +51,11 @@ runner:
     retry: 1
 
 defaults:
+  # Standard OpenCompass benchmarks use sample_limit -> reader_cfg.test_range.
+  # Set sample_limit: null for full dataset, or a string like "[:200]" / "[200:400]".
+  # For manual trace audits, prefer sample_indices: [0, 7, 23] to lock exact examples.
+  sample_limit: 100
+  sample_indices: null
   gen_length: 256
   gen_steps: 256
   gen_blocksize: 16
@@ -51,208 +64,266 @@ defaults:
   token_selection_confidence_threshold: null
   min_transfer_tokens: 1
   return_trace: false
+  # Keep snapshots off for normal sweeps because they can make step_trace.jsonl large.
+  # For 1-3 human-inspection samples, set both return_trace and trace_decode_snapshots to true.
+  trace_token_snapshots: false
+  trace_decode_snapshots: false
   context_prefix_tokens: 0
 
-experiments:
-  # Part 1: small paper-anchor sanity reproduction. These are not full paper
-  # reproductions; they check that model loading, mask_id, prompting, decoding,
-  # and evaluators behave plausibly on representative task families.
-  - name: paper_anchor_arc_c
-    enabled: false
-    benchmark: arc_c
-    params:
-      gen_length: 512
-      gen_steps: 512
-      gen_blocksize: 512
-      diff_confidence_eos_eot_inf: false
+tasks:
+  paper_anchor:
+    description: Full run on a small set of paper-anchor benchmarks; not a full paper reproduction.
+    experiments:
+      - name: paper_anchor_arc_c
+        # ARC-Challenge test is about 1.2k examples. null means run the full selected split.
+        # For a cheap smoke test, set sample_limit to "[:100]".
+        benchmark: arc_c
+        params:
+          sample_limit: null
+          gen_length: 512
+          gen_steps: 512
+          gen_blocksize: 512
+          diff_confidence_eos_eot_inf: false
 
-  - name: paper_anchor_gsm8k
-    enabled: false
-    benchmark: gsm8k
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 32
-      diff_confidence_eos_eot_inf: true
+      - name: paper_anchor_gsm8k
+        # GSM8K test has 1,319 examples. null means run the full selected split.
+        # For a cheap smoke test, set sample_limit to "[:100]".
+        benchmark: gsm8k
+        params:
+          sample_limit: null
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 32
+          diff_confidence_eos_eot_inf: true
 
-  - name: paper_anchor_mbpp
-    enabled: false
-    benchmark: mbpp
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 32
-      diff_confidence_eos_eot_inf: true
+      - name: paper_anchor_mbpp
+        # MBPP/sanitized-MBPP is a few hundred examples depending on split.
+        # null means run the full selected split. For a cheap smoke test, set "[:50]".
+        benchmark: mbpp
+        params:
+          sample_limit: null
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 32
+          diff_confidence_eos_eot_inf: true
 
-  # Part 2 / Task 1: Parallelism. GSM8K and MBPP are both generation benchmarks used in
-  # the LLaDA eval suite; GSM8K is cheap and stable, MBPP catches code-format
-  # sensitivity when block size changes.
-  - name: parallel_gsm8k
-    enabled: true
-    benchmark: gsm8k
-    params:
-      gen_length: 256
-      gen_steps: 256
-      diff_confidence_eos_eot_inf: true
-    sweep:
-      gen_blocksize: [1, 4, 8, 16, 32, 64, 128, 256]
+  parallel:
+    description: Parallel token commitment sweep on math and code generation.
+    experiments:
+      - name: parallel_gsm8k
+        # GSM8K full test: 1,319. Start with 100; set null only for final full run.
+        benchmark: gsm8k
+        params:
+          sample_limit: 100
+          gen_length: 256
+          gen_steps: 256
+          diff_confidence_eos_eot_inf: true
+        sweep:
+          gen_blocksize: [1, 4, 8, 16, 32, 64, 128, 256]
 
-  - name: parallel_mbpp
-    enabled: false
-    benchmark: mbpp
-    params:
-      gen_length: 512
-      gen_steps: 512
-      diff_confidence_eos_eot_inf: true
-    sweep:
-      gen_blocksize: [1, 4, 8, 16, 32, 64, 128, 256]
+      - name: parallel_mbpp
+        # MBPP full split is small but code execution is slower; start with 50.
+        benchmark: mbpp
+        params:
+          sample_limit: 50
+          gen_length: 512
+          gen_steps: 512
+          diff_confidence_eos_eot_inf: true
+        sweep:
+          gen_blocksize: [1, 4, 8, 16, 32, 64, 128, 256]
 
-  # Part 2 / Task 2: Context window. Needle/Passkey is a small controlled
-  # diagnostic task: dynamic filler text + one secret code + exact-match scoring.
-  - name: context_needle_passkey
-    enabled: false
-    benchmark: needle_passkey
-    params:
-      num_samples: 20
-      gen_length: 32
-      gen_steps: 32
-      gen_blocksize: 32
-      seed: 20260630
-      return_trace: true
-    sweep:
-      context_length: [512, 1024, 2048, 4096, 6144, 8192]
-      needle_position: [front, middle, end]
+  context:
+    description: Context length diagnostic, primarily Needle/Passkey.
+    experiments:
+      - name: context_needle_passkey
+        # Synthetic task. num_samples controls examples per context_length x position cell.
+        benchmark: needle_passkey
+        params:
+          num_samples: 20
+          gen_length: 32
+          gen_steps: 32
+          gen_blocksize: 32
+          seed: 20260630
+          return_trace: true
+        sweep:
+          context_length: [512, 1024, 2048, 4096, 6144, 8192]
+          needle_position: [front, middle, end]
 
-  # Optional auxiliary context stress on real tasks. This is less clean than
-  # Needle/Passkey because added filler may be ignored, so do not use it as the
-  # primary context-window claim.
-  - name: context_gsm8k_padding_aux
-    enabled: false
-    benchmark: gsm8k
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 16
-      diff_confidence_eos_eot_inf: true
-    sweep:
-      context_prefix_tokens: [0, 512, 1024, 2048, 4096, 6144]
+      - name: context_gsm8k_padding_aux
+        # Auxiliary distraction check on GSM8K. Keep small unless needed.
+        benchmark: gsm8k
+        params:
+          sample_limit: 100
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 16
+          diff_confidence_eos_eot_inf: true
+        sweep:
+          context_prefix_tokens: [0, 512, 1024, 2048, 4096, 6144]
 
-  # Part 2 / Task 3: ARness. Threshold controls how aggressively diffusion steps commit
-  # tokens. return_trace is enabled only here to keep the heavy per-step records
-  # focused on the ARness audit.
-  - name: arness_gsm8k_threshold
-    enabled: false
-    benchmark: gsm8k
-    params:
-      gen_length: 256
-      gen_steps: 256
-      diff_confidence_eos_eot_inf: true
-    sweep:
-      gen_blocksize: [1, 8, 32]
-      token_selection_confidence_threshold: [null, 0.4, 0.6, 0.8]
-      return_trace: [true]
+  arness:
+    description: Confidence threshold and block-size grid for ARness analysis.
+    experiments:
+      - name: arness_gsm8k_threshold
+        # GSM8K full test: 1,319. 100 samples x 12 grid cells is already useful.
+        # For human inspection of every diffusion edit, use the trace_audit task below.
+        benchmark: gsm8k
+        params:
+          sample_limit: 100
+          gen_length: 256
+          gen_steps: 256
+          diff_confidence_eos_eot_inf: true
+        sweep:
+          gen_blocksize: [1, 8, 32]
+          token_selection_confidence_threshold: [null, 0.4, 0.6, 0.8]
+          return_trace: [true]
 
-  - name: arness_mbpp_threshold
-    enabled: false
-    benchmark: mbpp
-    params:
-      gen_length: 512
-      gen_steps: 512
-      diff_confidence_eos_eot_inf: true
-    sweep:
-      gen_blocksize: [1, 8, 32]
-      token_selection_confidence_threshold: [null, 0.4, 0.6, 0.8]
-      return_trace: [true]
+      - name: arness_mbpp_threshold
+        # MBPP is slower because of code evaluation; start with 50 samples.
+        # For human inspection of every diffusion edit, use the trace_audit task below.
+        benchmark: mbpp
+        params:
+          sample_limit: 50
+          gen_length: 512
+          gen_steps: 512
+          diff_confidence_eos_eot_inf: true
+        sweep:
+          gen_blocksize: [1, 8, 32]
+          token_selection_confidence_threshold: [null, 0.4, 0.6, 0.8]
+          return_trace: [true]
 
-  # Paper-comparable capability snapshots. Keep disabled until smoke tests pass;
-  # enable for final tables once the infrastructure looks healthy.
-  - name: capability_mmlu
-    enabled: false
-    benchmark: mmlu
-    params:
-      gen_length: 3
-      gen_steps: 3
-      gen_blocksize: 3
-      diff_confidence_eos_eot_inf: false
+  trace_audit:
+    description: Small manually inspectable runs with full decoded per-step snapshots.
+    experiments:
+      - name: trace_audit_gsm8k
+        # These are original GSM8K split indices, not positions after sample_limit.
+        # Workflow: first inspect per_sample.jsonl from a trend run, then put interesting sample_idx values here.
+        benchmark: gsm8k
+        params:
+          sample_limit: null
+          sample_indices: [0, 7, 23]
+          gen_length: 256
+          gen_steps: 256
+          diff_confidence_eos_eot_inf: true
+          return_trace: true
+          trace_decode_snapshots: true
+        sweep:
+          gen_blocksize: [1, 8, 32]
+          token_selection_confidence_threshold: [null, 0.6, 0.8]
 
-  - name: capability_mmlu_pro
-    enabled: false
-    benchmark: mmlu_pro
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 256
-      diff_confidence_eos_eot_inf: false
+      - name: trace_audit_mbpp
+        # These are original MBPP split indices, not positions after sample_limit.
+        # Keep this tiny because each snapshot stores decoded text for every diffusion step.
+        benchmark: mbpp
+        params:
+          sample_limit: null
+          sample_indices: [0, 5, 12]
+          gen_length: 512
+          gen_steps: 512
+          diff_confidence_eos_eot_inf: true
+          return_trace: true
+          trace_decode_snapshots: true
+        sweep:
+          gen_blocksize: [1, 8, 32]
+          token_selection_confidence_threshold: [null, 0.6, 0.8]
 
-  - name: capability_hellaswag
-    enabled: false
-    benchmark: hellaswag
-    params:
-      gen_length: 3
-      gen_steps: 3
-      gen_blocksize: 3
-      diff_confidence_eos_eot_inf: false
+  capability:
+    description: Optional broader paper-comparable snapshots. Disabled unless selected via run.tasks or --only.
+    experiments:
+      - name: capability_mmlu
+        # MMLU is large across many subjects. Use 200 for a quick snapshot.
+        benchmark: mmlu
+        params:
+          sample_limit: 200
+          gen_length: 3
+          gen_steps: 3
+          gen_blocksize: 3
+          diff_confidence_eos_eot_inf: false
 
-  - name: capability_arc_c
-    enabled: false
-    benchmark: arc_c
-    params:
-      gen_length: 512
-      gen_steps: 512
-      gen_blocksize: 512
-      diff_confidence_eos_eot_inf: false
+      - name: capability_mmlu_pro
+        # MMLU-Pro is large and slower. Use 200 unless doing a final run.
+        benchmark: mmlu_pro
+        params:
+          sample_limit: 200
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 256
+          diff_confidence_eos_eot_inf: false
 
-  - name: capability_gsm8k
-    enabled: false
-    benchmark: gsm8k
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 16
-      diff_confidence_eos_eot_inf: true
+      - name: capability_hellaswag
+        # HellaSwag validation/test is large. Use 200 for snapshot.
+        benchmark: hellaswag
+        params:
+          sample_limit: 200
+          gen_length: 3
+          gen_steps: 3
+          gen_blocksize: 3
+          diff_confidence_eos_eot_inf: false
 
-  - name: capability_math
-    enabled: false
-    benchmark: math
-    params:
-      gen_length: 512
-      gen_steps: 512
-      gen_blocksize: 64
-      diff_confidence_eos_eot_inf: true
+      - name: capability_arc_c
+        benchmark: arc_c
+        params:
+          sample_limit: 200
+          gen_length: 512
+          gen_steps: 512
+          gen_blocksize: 512
+          diff_confidence_eos_eot_inf: false
 
-  - name: capability_gpqa
-    enabled: false
-    benchmark: gpqa
-    params:
-      gen_length: 64
-      gen_steps: 64
-      gen_blocksize: 64
-      diff_confidence_eos_eot_inf: true
+      - name: capability_gsm8k
+        benchmark: gsm8k
+        params:
+          sample_limit: 200
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 16
+          diff_confidence_eos_eot_inf: true
 
-  - name: capability_humaneval
-    enabled: false
-    benchmark: humaneval
-    params:
-      gen_length: 512
-      gen_steps: 512
-      gen_blocksize: 512
-      diff_logits_eos_inf: true
-      diff_confidence_eos_eot_inf: false
+      - name: capability_math
+        # MATH is larger and generation-heavy. Use 200 for snapshot.
+        benchmark: math
+        params:
+          sample_limit: 200
+          gen_length: 512
+          gen_steps: 512
+          gen_blocksize: 64
+          diff_confidence_eos_eot_inf: true
 
-  - name: capability_mbpp
-    enabled: false
-    benchmark: mbpp
-    params:
-      gen_length: 256
-      gen_steps: 256
-      gen_blocksize: 256
-      diff_confidence_eos_eot_inf: true
+      - name: capability_gpqa
+        # GPQA is smaller but expensive to generate/judge. Use 200 or full after smoke.
+        benchmark: gpqa
+        params:
+          sample_limit: 200
+          gen_length: 64
+          gen_steps: 64
+          gen_blocksize: 64
+          diff_confidence_eos_eot_inf: true
 
-  - name: capability_ifeval
-    enabled: false
-    benchmark: ifeval
-    params:
-      gen_length: 512
-      gen_steps: 512
-      gen_blocksize: 512
-      diff_confidence_eos_eot_inf: true
+      - name: capability_humaneval
+        # HumanEval has 164 problems; null means full HumanEval.
+        benchmark: humaneval
+        params:
+          sample_limit: null
+          gen_length: 512
+          gen_steps: 512
+          gen_blocksize: 512
+          diff_logits_eos_inf: true
+          diff_confidence_eos_eot_inf: false
+
+      - name: capability_mbpp
+        benchmark: mbpp
+        params:
+          sample_limit: 100
+          gen_length: 256
+          gen_steps: 256
+          gen_blocksize: 256
+          diff_confidence_eos_eot_inf: true
+
+      - name: capability_ifeval
+        # IFEval has a few hundred prompts. Use 200 for snapshot.
+        benchmark: ifeval
+        params:
+          sample_limit: 200
+          gen_length: 512
+          gen_steps: 512
+          gen_blocksize: 512
+          diff_confidence_eos_eot_inf: true

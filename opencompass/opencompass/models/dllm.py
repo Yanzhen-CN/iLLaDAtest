@@ -151,6 +151,8 @@ class LLaDAModel(BaseModel):
                  per_sample_output = None,
                  step_trace_output = None,
                  return_trace = False,
+                 trace_token_snapshots = False,
+                 trace_decode_snapshots = False,
                  context_prefix_tokens = 0,
                  context_prefix_text = 'Context padding sentence. ',
                  ) -> None:
@@ -198,6 +200,8 @@ class LLaDAModel(BaseModel):
         self.step_trace_output = step_trace_output
         self.metrics_output = self.per_sample_output
         self.return_trace = return_trace
+        self.trace_token_snapshots = bool(trace_token_snapshots)
+        self.trace_decode_snapshots = bool(trace_decode_snapshots)
         self.context_prefix_tokens = int(context_prefix_tokens)
         self.context_prefix_text = context_prefix_text
         self._profile_sample_idx = 0
@@ -417,6 +421,21 @@ class LLaDAModel(BaseModel):
             for record in records:
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
+    def _trace_with_decoded_snapshots(self, trace):
+        if not trace or not self.trace_decode_snapshots:
+            return trace
+        trace = dict(trace)
+        snapshots = []
+        for snapshot in trace.get('token_snapshots') or []:
+            item = dict(snapshot)
+            decoded = []
+            for token_ids in item.get('generated_token_ids') or []:
+                decoded.append(self.tokenizer.decode(token_ids, skip_special_tokens=False))
+            item['generated_text'] = decoded
+            snapshots.append(item)
+        trace['token_snapshots'] = snapshots
+        return trace
+
     def _build_profile_records(self, prompt_texts, responses, prompt_tokens, elapsed, trace, cuda_stats):
         batch_size = len(responses)
         total_generated_tokens = self.gen_length * batch_size
@@ -460,7 +479,7 @@ class LLaDAModel(BaseModel):
                 step_trace_records.append({
                     'sample_idx': sample_idx,
                     'batch_item_idx': int(i),
-                    'trace': trace,
+                    'trace': self._trace_with_decoded_snapshots(trace),
                 })
             self._profile_sample_idx += 1
         return per_sample_records, step_trace_records
@@ -498,6 +517,7 @@ class LLaDAModel(BaseModel):
         print('diff_confidence_eos_eot_inf:', self.diff_confidence_eos_eot_inf, 'diff_logits_eos_inf:', self.diff_logits_eos_inf)
         print('token_selection_confidence_threshold:', self.token_selection_confidence_threshold)
         print('min_transfer_tokens:', self.min_transfer_tokens, 'per_sample_output:', self.per_sample_output, 'step_trace_output:', self.step_trace_output, 'return_trace:', self.return_trace)
+        print('trace_token_snapshots:', self.trace_token_snapshots, 'trace_decode_snapshots:', self.trace_decode_snapshots)
         print('final prompt:', prompt)
         prompt_texts = prompt
         self.tokenizer.padding_side = "left" 
@@ -522,6 +542,7 @@ class LLaDAModel(BaseModel):
             token_selection_confidence_threshold = self.token_selection_confidence_threshold,
             min_transfer_tokens = self.min_transfer_tokens,
             return_trace = self.return_trace,
+            trace_token_snapshots = self.trace_token_snapshots or self.trace_decode_snapshots,
         )
         elapsed = time.perf_counter() - started
         cuda_stats = self._cuda_stats_after()
@@ -662,6 +683,7 @@ class LLaDABaseModel(LLaDAModel):
         print('diff_confidence_eos_eot_inf:', self.diff_confidence_eos_eot_inf, 'diff_logits_eos_inf:', self.diff_logits_eos_inf)
         print('token_selection_confidence_threshold:', self.token_selection_confidence_threshold)
         print('min_transfer_tokens:', self.min_transfer_tokens, 'per_sample_output:', self.per_sample_output, 'step_trace_output:', self.step_trace_output, 'return_trace:', self.return_trace)
+        print('trace_token_snapshots:', self.trace_token_snapshots, 'trace_decode_snapshots:', self.trace_decode_snapshots)
         print('final prompt:', prompt)
         prompt_texts = prompt
         self.tokenizer.padding_side = "left" 
@@ -686,6 +708,7 @@ class LLaDABaseModel(LLaDAModel):
             token_selection_confidence_threshold = self.token_selection_confidence_threshold,
             min_transfer_tokens = self.min_transfer_tokens,
             return_trace = self.return_trace,
+            trace_token_snapshots = self.trace_token_snapshots or self.trace_decode_snapshots,
         )
         elapsed = time.perf_counter() - started
         cuda_stats = self._cuda_stats_after()

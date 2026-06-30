@@ -51,6 +51,8 @@ class LLaDAEvalHarness(LM):
         per_sample_output=None,
         step_trace_output=None,
         return_trace=False,
+        trace_token_snapshots=False,
+        trace_decode_snapshots=False,
         device="cuda",
         **kwargs,
     ):
@@ -119,6 +121,8 @@ class LLaDAEvalHarness(LM):
         self.step_trace_output = step_trace_output
         self.metrics_output = self.per_sample_output
         self.return_trace = return_trace
+        self.trace_token_snapshots = bool(trace_token_snapshots)
+        self.trace_decode_snapshots = bool(trace_decode_snapshots)
 
         if self.rank == 0:
             for output_path in (self.per_sample_output, self.step_trace_output):
@@ -292,6 +296,21 @@ class LLaDAEvalHarness(LM):
                 record['model_path'] = getattr(self, 'model_path', None)
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
+    def _trace_with_decoded_snapshots(self, trace):
+        if not trace or not self.trace_decode_snapshots:
+            return trace
+        trace = dict(trace)
+        snapshots = []
+        for snapshot in trace.get('token_snapshots') or []:
+            item = dict(snapshot)
+            decoded = []
+            for token_ids in item.get('generated_token_ids') or []:
+                decoded.append(self.tokenizer.decode(token_ids, skip_special_tokens=False))
+            item['generated_text'] = decoded
+            snapshots.append(item)
+        trace['token_snapshots'] = snapshots
+        return trace
+
     def generate_until(self, requests: list[Instance]):
         def _tokenize(e):
             return {
@@ -325,6 +344,7 @@ class LLaDAEvalHarness(LM):
                 token_selection_confidence_threshold=self.token_selection_confidence_threshold,
                 min_transfer_tokens=self.min_transfer_tokens,
                 return_trace=self.return_trace,
+                trace_token_snapshots=self.trace_token_snapshots or self.trace_decode_snapshots,
             )
             elapsed = time.perf_counter() - started
             cuda_stats = self._cuda_stats_after()
@@ -374,7 +394,7 @@ class LLaDAEvalHarness(LM):
             if trace is not None:
                 self._write_jsonl(self.step_trace_output, [{
                     'sample_idx': sample_idx,
-                    'trace': trace,
+                    'trace': self._trace_with_decoded_snapshots(trace),
                 }])
 
             if self.accelerator is not None:

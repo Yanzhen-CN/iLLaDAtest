@@ -62,6 +62,7 @@ BENCHMARKS = {
 }
 
 CUSTOM_BENCHMARKS = {"needle_passkey"}
+EXPERIMENT_ONLY_KEYS = {"sample_limit", "sample_indices"}
 
 MODEL_TYPES = {
     "instruct": "LLaDAModel",
@@ -122,6 +123,46 @@ def expand_matrix(experiment: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         yield item
 
 
+def collect_experiments(config: Dict[str, Any], selected: set) -> List[Dict[str, Any]]:
+    tasks_cfg = config.get("tasks")
+    if not tasks_cfg:
+        experiments = config.get("experiments", []) or []
+        if selected:
+            return [exp for exp in experiments if exp.get("name") in selected]
+        return [exp for exp in experiments if exp.get("enabled", True) is not False]
+
+    run_cfg = config.get("run", {}) or {}
+    configured_tasks = set(as_list(run_cfg.get("tasks")))
+    configured_experiments = set(as_list(run_cfg.get("experiments")))
+    if not selected and not configured_tasks and not configured_experiments:
+        raise SystemExit("No task selected. Set `run.tasks` in config or pass `--only <task_or_experiment>`.")
+
+    selected_all = "all" in selected or "all" in configured_tasks
+    active = []
+    for task_name, task_def in tasks_cfg.items():
+        task_experiments = task_def.get("experiments", []) or []
+        task_selected = (
+            selected_all
+            or task_name in selected
+            or (not selected and task_name in configured_tasks)
+        )
+        for experiment in task_experiments:
+            exp_name = experiment.get("name")
+            exp_selected = (
+                selected_all
+                or exp_name in selected
+                or (not selected and exp_name in configured_experiments)
+            )
+            if not task_selected and not exp_selected:
+                continue
+            if experiment.get("enabled", True) is False and not selected and not configured_experiments:
+                continue
+            item = deepcopy(experiment)
+            item.setdefault("task", task_name)
+            active.append(item)
+    return active
+
+
 def safe_name(value: str) -> str:
     keep = []
     for char in value.lower():
@@ -138,7 +179,7 @@ def build_model_cfg(global_model: Dict[str, Any], params: Dict[str, Any], benchm
     model_cfg.setdefault("abbr", f"{Path(str(model_cfg.get('path', 'model'))).name}-{benchmark}")
     model_cfg["abbr"] = safe_name(f"{model_cfg['abbr']}_{run_name}")
     model_cfg["type"] = MODEL_TYPES[model_type]
-    model_cfg.update(params)
+    model_cfg.update({key: value for key, value in params.items() if key not in EXPERIMENT_ONLY_KEYS})
     return model_cfg
 
 
@@ -146,6 +187,8 @@ def render_opencompass_config(
     benchmark: str,
     model_cfg: Dict[str, Any],
     runner_cfg: Dict[str, Any],
+    sample_limit: Any = None,
+    sample_indices: Any = None,
 ) -> str:
     if benchmark not in BENCHMARKS:
         raise SystemExit(f"Unknown benchmark `{benchmark}`. Available: {', '.join(sorted(BENCHMARKS))}")
@@ -164,6 +207,20 @@ def render_opencompass_config(
     imports.append("from opencompass.tasks import OpenICLInferTask")
     imports.append("")
     imports.append(f"datasets = {bench['var']}")
+    if sample_indices is not None:
+        indices = [int(item) for item in as_list(sample_indices)]
+        test_range = "indices:" + ",".join(str(item) for item in indices)
+        imports.append(f"_sample_test_range = {python_literal(test_range)}")
+        imports.append("for _dataset in datasets:")
+        imports.append("    _dataset.setdefault('reader_cfg', {})['test_range'] = _sample_test_range")
+    elif sample_limit is not None:
+        if isinstance(sample_limit, int):
+            test_range = f"[:{sample_limit}]"
+        else:
+            test_range = sample_limit
+        imports.append(f"_sample_test_range = {python_literal(test_range)}")
+        imports.append("for _dataset in datasets:")
+        imports.append("    _dataset.setdefault('reader_cfg', {})['test_range'] = _sample_test_range")
     if "summary_var" in bench:
         imports.append(f"summarizer = dict(summary_groups={bench['summary_var']})")
 
@@ -586,6 +643,7 @@ def run_needle_passkey(
             token_selection_confidence_threshold=params.get("token_selection_confidence_threshold"),
             min_transfer_tokens=int(params.get("min_transfer_tokens", 1)),
             return_trace=True,
+            trace_token_snapshots=bool(params.get("trace_token_snapshots") or params.get("trace_decode_snapshots")),
         )
         elapsed = time.perf_counter() - started
         cuda_stats = cuda_stats_after(model.device)
@@ -623,6 +681,17 @@ def run_needle_passkey(
         with per_sample_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         if step_trace_path is not None:
+            if params.get("trace_decode_snapshots") and trace.get("token_snapshots"):
+                snapshots = []
+                for snapshot in trace.get("token_snapshots") or []:
+                    item = dict(snapshot)
+                    item["generated_text"] = [
+                        tokenizer.decode(token_ids, skip_special_tokens=False)
+                        for token_ids in item.get("generated_token_ids") or []
+                    ]
+                    snapshots.append(item)
+                trace = dict(trace)
+                trace["token_snapshots"] = snapshots
             with step_trace_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"sample_idx": sample_idx, "trace": trace}, ensure_ascii=False) + "\n")
     return 0
@@ -632,7 +701,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run iLLaDA/LLaDA benchmark experiments from test_config.yaml.")
     parser.add_argument("--config", default="test_config.yaml", help="Path to the YAML config.")
     parser.add_argument("--dry-run", action="store_true", help="Generate configs and commands without running OpenCompass.")
-    parser.add_argument("--only", nargs="*", help="Run only experiments with these names.")
+    parser.add_argument("--only", nargs="*", help="Run only these task sections or experiment names.")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -653,24 +722,20 @@ def main() -> int:
     global_model = config.get("model", {}) or {}
     runner_cfg = config.get("runner", {}) or {}
     default_params = config.get("defaults", {}) or {}
-    experiments = config.get("experiments", []) or []
+    selected = set(args.only or [])
+    experiments = collect_experiments(config, selected)
     if not experiments:
-        raise SystemExit("No experiments found in config.")
+        raise SystemExit("No experiments matched the selected task or experiment names.")
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(OPENCOMPASS_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     manifest_path = output_dir / "run_manifest.jsonl"
-    selected = set(args.only or [])
     planned = 0
 
     for experiment in experiments:
         exp_name = experiment.get("name")
         if not exp_name:
             raise SystemExit("Every experiment needs a `name`.")
-        if selected and exp_name not in selected:
-            continue
-        if not selected and experiment.get("enabled", True) is False:
-            continue
 
         for benchmark in as_list(experiment.get("benchmark")):
             if not benchmark:
@@ -693,11 +758,18 @@ def main() -> int:
                         encoding="utf-8",
                     )
                 else:
-                    config_text = render_opencompass_config(benchmark, deepcopy(model_cfg), runner_cfg)
+                    config_text = render_opencompass_config(
+                        benchmark,
+                        deepcopy(model_cfg),
+                        runner_cfg,
+                        sample_limit=merged_params.get("sample_limit"),
+                        sample_indices=merged_params.get("sample_indices"),
+                    )
                     generated_config.write_text(config_text, encoding="utf-8")
                 work_dir.mkdir(parents=True, exist_ok=True)
                 run_config = {
                     "run_name": run_name,
+                    "task": experiment.get("task"),
                     "experiment": exp_name,
                     "benchmark": benchmark,
                     "params": merged_params,
@@ -727,6 +799,7 @@ def main() -> int:
 
                 manifest = {
                     "run_name": run_name,
+                    "task": experiment.get("task"),
                     "experiment": exp_name,
                     "benchmark": benchmark,
                     "params": merged_params,

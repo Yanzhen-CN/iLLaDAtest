@@ -44,7 +44,7 @@ def get_num_transfer_tokens(mask_index, steps):
 def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, block_length=128, temperature=0.,
              cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False,
              confidence_eos_eot_inf=False, token_selection_confidence_threshold=None,
-             min_transfer_tokens=1, return_trace=False):
+             min_transfer_tokens=1, return_trace=False, trace_token_snapshots=False):
     '''
     Args:
         model: Mask predictor.
@@ -64,6 +64,7 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         min_transfer_tokens: Minimum number of tokens to transfer for each sample when the scheduled transfer count is
             positive. This prevents high confidence thresholds from stalling with residual mask tokens.
         return_trace: If True, return (tokens, trace) with per-step transfer statistics.
+        trace_token_snapshots: If True, include generated-region token IDs after every diffusion step.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -89,6 +90,7 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         'min_transfer_tokens': int(min_transfer_tokens),
         'fallback_transfer_count': 0,
         'step_stats': [],
+        'token_snapshots': [] if trace_token_snapshots else None,
     } if return_trace else None
 
     for num_block in range(num_blocks):
@@ -160,6 +162,12 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
                     'mean_confidence': step_confidence_sum / step_transfer_count if step_transfer_count else None,
                     'remaining_masks': int((x == mask_id).sum().item()),
                 })
+                if trace_token_snapshots:
+                    trace['token_snapshots'].append({
+                        'block': int(num_block),
+                        'step': int(i),
+                        'generated_token_ids': x[:, prompt.shape[1]:].detach().cpu().tolist(),
+                    })
 
     if trace is not None:
         trace['final_mask_count'] = int((x == mask_id).sum().item())
